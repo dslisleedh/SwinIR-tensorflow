@@ -54,13 +54,13 @@ class MLP(tf.keras.layers.Layer):
             self,
             n_filters: int,
             expansion_rate: float = 4.,
-            drop: float = 0.,
+            drop_rate: float = 0.,
             act=tf.nn.gelu
     ):
         super(MLP, self).__init__()
         self.n_filters = n_filters
         self.expansion_rate = expansion_rate
-        self.drop = drop
+        self.drop_rate = drop_rate
         self.act = act
 
         self.forward = tf.keras.Sequential([
@@ -74,7 +74,7 @@ class MLP(tf.keras.layers.Layer):
                 kernel_initializer=tf.keras.initializers.VarianceScaling(.02)
             )
         ] + [
-            DropPath(1. - self.drop) if self.drop > 0. else tf.keras.layers.Lambda(lambda x: x)
+            DropPath(1. - self.drop_rate) if self.drop_rate > 0. else tf.keras.layers.Layer()
         ])
 
     def call(self, inputs, *args, **kwargs):
@@ -89,7 +89,7 @@ class WindowAttention(tf.keras.layers.Layer):
             window_size: int,
             shift_size: Union[int, None],
             n_heads: int,
-            qk_scale=None,
+            qk_scale: Union[float, None] = None,
             qkv_bias: bool = True
     ):
         super(WindowAttention, self).__init__()
@@ -126,8 +126,7 @@ class WindowAttention(tf.keras.layers.Layer):
         )
         xx = (relative_coords[:, :, 0] + win_h - 1) * (2 * win_w - 1)
         yy = relative_coords[:, :, 1] + win_w - 1
-        relative_coords = tf.stack([xx, yy,], axis=-1)
-
+        relative_coords = tf.stack([xx, yy], axis=-1)
         return tf.reduce_sum(relative_coords, axis=-1)
 
     def get_relative_positional_bias(self):
@@ -147,8 +146,9 @@ class WindowAttention(tf.keras.layers.Layer):
         )
         super(WindowAttention, self).build(input_shape)
 
-    def call(self, inputs, mask=None):
-        #input : B N C
+    def call(self, inputs, mask=None, *args, **kwargs):
+        # input : B N C
+        _, N, _ = tf.shape(inputs)
         q, k, v = tf.unstack(
             einops.rearrange(
                 self.to_qkv(
@@ -161,14 +161,13 @@ class WindowAttention(tf.keras.layers.Layer):
         attention_map = attention_map + self.get_relative_positional_bias()
 
         if tf.is_tensor(mask):
-            attention_map = einops.rearrange(
-                attention_map, '(B W) H N1 N2 -> B W H N1 N2',  # H: Heads, W: Windows
-                W=tf.shape(mask)[0]
+            num_wins = tf.shape(mask)[0]
+            attention_map = tf.reshape(
+                attention_map, (-1, num_wins, self.n_heads, N, N)
             )
             attention_map = attention_map + tf.expand_dims(mask, 1)[None, ...]
-            attention_map = einops.rearrange(
-                attention_map, 'B W H N1 N2 -> (B W) H N1 N2'
-            )
+
+            attention_map = tf.reshape(attention_map, (-1, self.n_heads, N, N))
 
         attention = tf.nn.softmax(attention_map, axis=-1)
 
@@ -188,7 +187,7 @@ class SwinTransformerLayer(tf.keras.layers.Layer):
             window_size: int,
             shift_size: Union[int, None],
             n_heads: int,
-            qkv_bias:bool,
+            qkv_bias: bool,
             drop_rate: float,
             norm=tf.keras.layers.LayerNormalization
     ):
@@ -207,7 +206,7 @@ class SwinTransformerLayer(tf.keras.layers.Layer):
         )
         self.ln_ffn = norm()
         self.ffn = MLP(
-            self.n_filters, drop=self.drop_rate
+            self.n_filters, self.drop_rate
         )
 
     def get_attention_mask(self, input_shape: Sequence):
@@ -245,13 +244,16 @@ class SwinTransformerLayer(tf.keras.layers.Layer):
             attn_res = tf.roll(
                 attn_res, shift=(-self.shift_size, -self.shift_size), axis=(1, 2)
             )
+            mask = self.get_attention_mask((h, w))
+        else:
+            mask = None
 
         attn_res = window_partition(attn_res, self.window_size)  #n_windows*B window_size window_size C
         attn_res = einops.rearrange(
             attn_res, 'B W1 W2 C -> B (W1 W2) C'
         )  # n_windows*B window_size*window_size C
 
-        attn_res = self.window_attention(attn_res)  # n_windows*B window_size*window_size C
+        attn_res = self.window_attention(attn_res, mask=mask)  # n_windows*B window_size*window_size C
         attn_res = einops.rearrange(
             attn_res, 'B (W1 W2) C -> B W1 W2 C',
             W1=self.window_size, W2=self.window_size
