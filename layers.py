@@ -38,7 +38,7 @@ class DropPath(tf.keras.layers.Layer):
             state = K.random_bernoulli(
                 shape=(), p=self.survival_prob
             )
-            return inputs * self.survival_prob * state
+            return inputs / self.survival_prob * state
 
         def _call_test():
             return inputs
